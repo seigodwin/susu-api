@@ -1,0 +1,6 @@
+@Susu.Api_HostAddress = http://localhost:5038
+
+GET {{Susu.Api_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
