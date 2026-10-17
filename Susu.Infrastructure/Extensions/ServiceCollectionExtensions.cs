@@ -19,7 +19,8 @@ namespace Susu.Infrastructure.Extensions
 
             services.AddDbContext<AppDbContext>(options => options.UseNpgsql(conn));
 
-            services.AddScoped(typeof(IBaseRepository<>), typeof(BaseRepository<>));
+            // Use EF-backed repository when DbContext is available
+            services.AddScoped(typeof(IBaseRepository<>), typeof(EfRepository<>));
 
             return services;
         }

@@ -1,92 +1,137 @@
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading.Tasks;
 using Susu.Application.Interfaces;
+using Susu.Application.Specifications;
 using Susu.Domain.Entities;
 
 namespace Susu.Application.Services
 {
     public class GroupService : IGroupService
     {
-        // simple in-memory stores keyed by group.Id
-        private readonly ConcurrentDictionary<Guid, ConcurrentDictionary<int, ConcurrentDictionary<Guid, decimal>>> _payments
-            = new(); // groupId -> week -> memberId -> amount
+        private readonly IBaseRepository<Group> _groupRepo;
+        private readonly IBaseRepository<Member> _memberRepo;
+        private readonly IBaseRepository<Contribution> _contributionRepo;
+        private readonly IBaseRepository<PayoutEntry> _payoutRepo;
 
-        private readonly ConcurrentDictionary<Guid, List<PayoutEntry>> _payouts
-            = new(); // groupId -> list of payouts
-
-        private readonly ConcurrentDictionary<Guid, int> _currentWeek
-            = new(); // groupId -> current week
-
-        private readonly ConcurrentDictionary<Guid, int> _nextPayoutIndex
-            = new(); // groupId -> next index
-
-        public Group CreateGroup(string name, string description, decimal weeklyContribution)
+        public GroupService(
+            IBaseRepository<Group> groupRepo,
+            IBaseRepository<Member> memberRepo,
+            IBaseRepository<Contribution> contributionRepo,
+            IBaseRepository<PayoutEntry> payoutRepo)
         {
-            var g = Group.Create(name, description, weeklyContribution);
-            // initialize stores
-            _payments[g.Id] = new ConcurrentDictionary<int, ConcurrentDictionary<Guid, decimal>>();
-            _payouts[g.Id] = new List<PayoutEntry>();
-            _currentWeek[g.Id] = 1;
-            _nextPayoutIndex[g.Id] = 0;
-            return g;
+            _groupRepo = groupRepo;
+            _memberRepo = memberRepo;
+            _contributionRepo = contributionRepo;
+            _payoutRepo = payoutRepo;
         }
 
-        public void AddMember(Guid groupId, Member member)
+        public async Task<Group> CreateGroupAsync(string name, string description, decimal weeklyContribution)
+        {
+            var group = Group.Create(name, description, weeklyContribution);
+            return await _groupRepo.AddAsync(group);
+        }
+
+        public async Task AddMemberAsync(Guid groupId, Member member)
         {
             if (member == null) throw new ArgumentNullException(nameof(member));
-            // find group - assume caller has Group instance; for demo we'll require group passed by id and member assigned elsewhere
-            // In a real app you'd fetch group from a repository; here we throw if group not found by stores
-            if (!_payments.ContainsKey(groupId))
-                throw new InvalidOperationException("Unknown group.");
+            var group = await _groupRepo.GetByIdAsync(groupId) ?? throw new InvalidOperationException("Unknown group.");
 
-            // naive: we cannot access group's Members list here because repository is not implemented; assume caller manages adding to Group.Members
-            // still validate duplicate by scanning member.Id in existing payouts or payments
-            // For simplicity we do not duplicate-check here; recommend caller use Group.AddMember first
+            // reject duplicate by Id or Name
+            if (group.Members.Any(m => m.Id == member.Id)) throw new InvalidOperationException("Member with same Id exists.");
+            if (group.Members.Any(m => string.Equals(m.Name, member.Name, StringComparison.OrdinalIgnoreCase))) throw new InvalidOperationException("Member with same name exists.");
+
+            // rule: cannot add new members after first contribution recorded
+            var contribCount = await _contributionRepo.CountAsync(new BaseSpecification<Contribution>(c => c.GroupId == groupId));
+            if (contribCount > 0) throw new InvalidOperationException("Cannot add member after payments have started.");
+
+            // assign and persist
+            member.AssignToGroup(group);
+            await _memberRepo.AddAsync(member);
+            group.Members.Add(member);
+            await _groupRepo.UpdateAsync(group);
         }
 
-        public void RecordContribution(Guid groupId, Guid memberId, decimal amount, int? week = null)
+        public async Task RecordContributionAsync(Guid groupId, Guid memberId, decimal amount, int? week = null)
         {
             if (amount <= 0) throw new ArgumentException("Amount must be positive.", nameof(amount));
-            if (!_payments.TryGetValue(groupId, out var groupPayments))
-                throw new InvalidOperationException("Unknown group.");
+            var group = await _groupRepo.GetByIdAsync(groupId) ?? throw new InvalidOperationException("Unknown group.");
 
-            var targetWeek = week ?? _currentWeek.GetValueOrDefault(groupId, 1);
-            var weekMap = groupPayments.GetOrAdd(targetWeek, _ => new ConcurrentDictionary<Guid, decimal>());
-            weekMap.AddOrUpdate(memberId, amount, (_, existing) => existing + amount);
+            var member = group.Members.FirstOrDefault(m => m.Id == memberId);
+            if (member == null) throw new InvalidOperationException("Unknown member or member does not belong to group.");
+
+            var targetWeek = week ?? group.CurrentWeek;
+
+            // sum existing contributions for this member/week
+            var spec = new BaseSpecification<Contribution>(c => c.GroupId == groupId && c.MemberId == memberId && c.Week == targetWeek);
+            var existing = await _contributionRepo.ListAsync(spec);
+            var alreadyPaid = existing.Sum(c => c.Amount);
+            var owed = group.WeeklyContribution - alreadyPaid;
+            if (owed <= 0) throw new InvalidOperationException("Member has already paid in full for the week.");
+            if (amount > owed) throw new InvalidOperationException("Payment exceeds amount owed for the week.");
+
+            var contribution = new Contribution { GroupId = groupId, MemberId = memberId, Week = targetWeek, Amount = amount, PaidAt = DateTime.UtcNow };
+            await _contributionRepo.AddAsync(contribution);
         }
 
-        public CloseWeekResult CloseWeek(Guid groupId, int? week = null)
+        public async Task<CloseWeekResult> CloseWeekAsync(Guid groupId, int? week = null)
         {
-            if (!_payments.TryGetValue(groupId, out var groupPayments))
-                throw new InvalidOperationException("Unknown group.");
+            var group = await _groupRepo.GetByIdAsync(groupId) ?? throw new InvalidOperationException("Unknown group.");
+            var targetWeek = week ?? group.CurrentWeek;
 
-            var targetWeek = week ?? _currentWeek.GetValueOrDefault(groupId, 1);
-            groupPayments.TryGetValue(targetWeek, out var weekMap);
-            weekMap ??= new ConcurrentDictionary<Guid, decimal>();
+            var owes = new Dictionary<Guid, decimal>();
+            foreach (var m in group.Members)
+            {
+                var spec = new BaseSpecification<Contribution>(c => c.GroupId == groupId && c.MemberId == m.Id && c.Week == targetWeek);
+                var payments = await _contributionRepo.ListAsync(spec);
+                var paid = payments.Sum(p => p.Amount);
+                var owed = group.WeeklyContribution - paid;
+                if (owed > 0) owes[m.Id] = owed;
+            }
 
-            // In absence of repository, we cannot enumerate members from Group; this implementation requires caller to provide group membership
-            // To make this workable, require that a simple membership registry be inferred from payouts store and payments keys.
-            var memberIds = weekMap.Keys.Union(_payouts.GetValueOrDefault(groupId, new List<PayoutEntry>()).Select(p => p.RecipientId)).Distinct().ToList();
-            // If no members known, cannot close
-            if (!memberIds.Any())
-                throw new InvalidOperationException("No members recorded for group; cannot determine owes.");
+            if (owes.Count > 0)
+            {
+                return new CloseWeekResult { Week = targetWeek, PaidOut = false, Owes = owes, Payout = null };
+            }
 
-            // For the weekly amount we cannot read Group. So this service assumes the caller knows the weekly amount; this is suboptimal.
-            // Better approach: service should receive the Group instance. We'll change signatures to accept Group where needed.
-            throw new NotImplementedException("CloseWeek requires Group instance; please use CloseWeek(Group group, ...) instead.");
+            if (!group.Members.Any()) throw new InvalidOperationException("No members to pay out to.");
+
+            var pot = group.WeeklyContribution * group.Members.Count;
+            if (group.NextPayoutIndex >= group.Members.Count) group.NextPayoutIndex = 0;
+            var recipient = group.Members.ElementAt(group.NextPayoutIndex);
+
+            var payout = new PayoutEntry { GroupId = groupId, Week = targetWeek, RecipientId = recipient.Id, RecipientName = recipient.Name, Amount = pot, PaidAt = DateTime.UtcNow };
+            await _payoutRepo.AddAsync(payout);
+
+            group.NextPayoutIndex = (group.NextPayoutIndex + 1) % group.Members.Count;
+            if (targetWeek == group.CurrentWeek) group.CurrentWeek++;
+            await _groupRepo.UpdateAsync(group);
+
+            return new CloseWeekResult { Week = targetWeek, PaidOut = true, Owes = new Dictionary<Guid, decimal>(), Payout = payout };
         }
 
-        public WeekReport GetReport(Guid groupId, int? week = null)
+        public async Task<WeekReport> GetReportAsync(Guid groupId, int? week = null)
         {
-            throw new NotImplementedException("GetReport requires Group instance; implement after wire-up with repository or caller-provided Group.");
-        }
+            var group = await _groupRepo.GetByIdAsync(groupId) ?? throw new InvalidOperationException("Unknown group.");
+            var targetWeek = week ?? group.CurrentWeek;
 
-        // Helper to get or init payouts list
-        private List<PayoutEntry> GetPayoutsForGroup(Guid groupId)
-        {
-            return _payouts.GetValueOrDefault(groupId) ?? (_payouts[groupId] = new List<PayoutEntry>());
+            var paidInFull = new List<Guid>();
+            var owes = new Dictionary<Guid, decimal>();
+
+            foreach (var m in group.Members)
+            {
+                var spec = new BaseSpecification<Contribution>(c => c.GroupId == groupId && c.MemberId == m.Id && c.Week == targetWeek);
+                var payments = await _contributionRepo.ListAsync(spec);
+                var paid = payments.Sum(p => p.Amount);
+                var owed = group.WeeklyContribution - paid;
+                if (owed <= 0) paidInFull.Add(m.Id);
+                else owes[m.Id] = owed;
+            }
+
+            var payoutHistory = await _payoutRepo.ListAsync(new BaseSpecification<PayoutEntry>(p => p.GroupId == groupId));
+
+            return new WeekReport { Week = targetWeek, PaidInFull = paidInFull, Owes = owes, PayoutHistory = payoutHistory.ToList() };
         }
     }
 }

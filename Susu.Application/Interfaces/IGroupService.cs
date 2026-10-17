@@ -6,11 +6,11 @@ namespace Susu.Application.Interfaces
 {
     public interface IGroupService
     {
-        Group CreateGroup(string name, string description, decimal weeklyContribution);
-        void AddMember(Guid groupId, Member member);
-        void RecordContribution(Guid groupId, Guid memberId, decimal amount, int? week = null);
-        CloseWeekResult CloseWeek(Guid groupId, int? week = null);
-        WeekReport GetReport(Guid groupId, int? week = null);
+        System.Threading.Tasks.Task<Group> CreateGroupAsync(string name, string description, decimal weeklyContribution);
+        System.Threading.Tasks.Task AddMemberAsync(Guid groupId, Member member);
+        System.Threading.Tasks.Task RecordContributionAsync(Guid groupId, Guid memberId, decimal amount, int? week = null);
+        System.Threading.Tasks.Task<CloseWeekResult> CloseWeekAsync(Guid groupId, int? week = null);
+        System.Threading.Tasks.Task<WeekReport> GetReportAsync(Guid groupId, int? week = null);
     }
 
     public sealed class CloseWeekResult
