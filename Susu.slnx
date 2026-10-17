@@ -1,1 +1,16 @@
-<Solution />
+
+<Solution>
+  <Folder Name="/Api/">
+    <Project Path="Susu.Api/Susu.Api.csproj" />
+  </Folder>
+  <Folder Name="/Application/">
+    <Project Path="Susu.Application/Susu.Application.csproj" />
+  </Folder>
+  <Folder Name="/Domain/">
+    <Project Path="Susu.Domain/Susu.Domain.csproj" />
+  </Folder>
+  <Folder Name="/Infrastructure/">
+    <Project Path="Susu.Infrastructure/Susu.Infrastructure.csproj" />
+  </Folder>
+  <Folder Name="/Solution Items/" />
+</Solution>
