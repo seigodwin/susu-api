@@ -1,10 +1,16 @@
+using Susu.Infrastructure.Extensions;
+using Susu.Application.Services;
+using Susu.Application.Interfaces;
+
 var builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container.
-
 builder.Services.AddControllers();
-// Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
 builder.Services.AddOpenApi();
+
+// Infrastructure and application services
+builder.Services.AddInfrastructure(builder.Configuration);
+builder.Services.AddScoped<IGroupService, GroupService>();
 
 var app = builder.Build();
 
