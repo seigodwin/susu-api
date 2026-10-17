@@ -21,6 +21,24 @@ namespace Susu.Infrastructure.Extensions
 
             // Use EF-backed repository when DbContext is available
             services.AddScoped(typeof(IBaseRepository<>), typeof(EfRepository<>));
+            // Unit of Work for transactional operations
+            services.AddScoped<Susu.Application.Interfaces.IUnitOfWork, Susu.Infrastructure.UnitOfWork>();
+            // Register data seeder and run it immediately to seed demo data if DB empty
+            services.AddScoped<Susu.Infrastructure.Data.DataSeeder>();
+            // Build a temporary provider to run seeding synchronously during startup
+            var sp = services.BuildServiceProvider();
+            using (var scope = sp.CreateScope())
+            {
+                var seeder = scope.ServiceProvider.GetService<Susu.Infrastructure.Data.DataSeeder>();
+                try
+                {
+                    seeder?.SeedDemoAsync().GetAwaiter().GetResult();
+                }
+                catch
+                {
+                    // swallow seeding errors here; in real app log the failure
+                }
+            }
 
             return services;
         }

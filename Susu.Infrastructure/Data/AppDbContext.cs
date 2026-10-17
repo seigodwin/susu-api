@@ -32,6 +32,7 @@ namespace Susu.Infrastructure.Data
                 b.HasKey(m => m.Id);
                 b.Property(m => m.Name).IsRequired();
                 b.Property(m => m.Email).HasMaxLength(256);
+                b.Property(m => m.JoinedAt).HasColumnType("timestamp without time zone");
             });
 
             modelBuilder.Entity<Contribution>(b =>

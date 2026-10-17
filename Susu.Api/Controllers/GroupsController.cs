@@ -53,7 +53,6 @@ namespace Susu.Api.Controllers
         public async Task<IActionResult> AddMember(Guid groupId, [FromBody] AddMemberDto dto)
         {
             var member = Member.Create(dto.Name, dto.Email, groupId);
-            if (dto.Id.HasValue) member = new Member { /* can't set Id directly; create method used */ };
             try
             {
                 await _groupService.AddMemberAsync(groupId, member);
